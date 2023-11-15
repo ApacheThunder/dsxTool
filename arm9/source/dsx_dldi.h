@@ -23,7 +23,6 @@
 extern "C" {
 #endif
 
-extern void PrintProgramName(void);
 void dsxWaitMs(unsigned int requestTime);
 void dsxSendCommand(unsigned int command[2], unsigned int pageSize, unsigned int latency, unsigned char *buf);
 void dsxPoll(void);
@@ -36,6 +35,18 @@ bool dsxWriteSectors (u32 sector, u32 numSectors, void* buffer);
 bool dsx2ReadSectors (u32 sector, u32 numSectors, void* buffer);
 bool dsx2WriteSectors (u32 sector, u32 numSectors, void* buffer);
 bool dsxShutdown(void);
+
+const DISC_INTERFACE io_dsx_ = {
+    0x44535820, // "DSX "
+    FEATURE_MEDIUM_CANREAD | FEATURE_MEDIUM_CANWRITE | FEATURE_SLOT_NDS,
+    (FN_MEDIUM_STARTUP)&dsxStartup,
+    (FN_MEDIUM_ISINSERTED)&dsxIsInserted,
+    (FN_MEDIUM_READSECTORS)&dsxReadSectors,
+    (FN_MEDIUM_WRITESECTORS)&dsxWriteSectors,
+    (FN_MEDIUM_CLEARSTATUS)&dsxClearStatus,
+    (FN_MEDIUM_SHUTDOWN)&dsxShutdown
+};
+
 
 #ifdef __cplusplus
 }

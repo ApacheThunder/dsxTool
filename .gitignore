@@ -35,6 +35,7 @@
 *.bin
 *.tmd
 *.cia
+*.cmd
 *.nds
 *.app
 *.arm7

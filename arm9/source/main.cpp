@@ -2,6 +2,7 @@
 #include <fat.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <dirent.h>
 #include <nds/arm9/dldi.h>
 #include <nds/fifocommon.h>
 #include <nds/fifomessages.h>
@@ -44,11 +45,12 @@
 
 #define StatRefreshRate 41
 
+static ALIGN(4) sNDSHeaderExt cartHeader;
+
 u8 CopyBuffer[SECTOR_SIZE*USED_NUMSECTORS];
 u8 BannerBuffer[BANNERBUFFERSIZE];
 u8 ReadBuffer[SECTOR_SIZE];
 
-extern int tempSectorTracker;
 
 bool ErrorState = false;
 
@@ -57,31 +59,18 @@ bool sdMounted = false;
 
 char gameTitle[13] = {0};
 
-DISC_INTERFACE io_dsx_ = {
-    0x44535820, // "DSX "
-    FEATURE_MEDIUM_CANREAD | FEATURE_MEDIUM_CANWRITE | FEATURE_SLOT_NDS,
-    (FN_MEDIUM_STARTUP)&dsxStartup,
-    (FN_MEDIUM_ISINSERTED)&dsxIsInserted,
-    (FN_MEDIUM_READSECTORS)&dsxReadSectors,
-    (FN_MEDIUM_WRITESECTORS)&dsxWriteSectors,
-    (FN_MEDIUM_CLEARSTATUS)&dsxClearStatus,
-    (FN_MEDIUM_SHUTDOWN)&dsxShutdown
-};
+static const char* textBuffer = "X------------------------------X\nX------------------------------X";
+static const char* textProgressBuffer = "X------------------------------X\nX------------------------------X";
+
+int ProgressTracker;
+bool UpdateProgressText;
 
 void DoWait(int waitTime = 30) {
 	if (waitTime > 0)for (int i = 0; i < waitTime; i++) { swiWaitForVBlank(); }
 }
 
-void PrintProgramName() {
-	consoleClear();
-	printf("\n");
-	printf("<------------------------------>\n");
-	printf("      DSX Special NAND Tool     \n");
-	printf("<------------------------------>\n\n");
-}
-
 void DoFATerror(bool isFatel) {
-	PrintProgramName();
+	consoleClear();
 	printf("FAT Init Failed!\n");
 	ErrorState = isFatel;
 	while(1) {
@@ -92,10 +81,9 @@ void DoFATerror(bool isFatel) {
 }
 
 void CardInit(bool Silent, bool SCFGUnlocked, bool SkipSlotReset = false) {
-	if (!Silent) { PrintProgramName(); }
+	if (!Silent) { consoleClear(); }
 	DoWait(30);
 	// Do cart init stuff to wake cart up. DLDI init may fail otherwise!
-	sNDSHeaderExt cartHeader;
 	cardInit(&cartHeader, SkipSlotReset);
 	char gameCode[7] = {0};
 	tonccpy(gameTitle, cartHeader.gameTitle, 12);
@@ -109,22 +97,20 @@ void CardInit(bool Silent, bool SCFGUnlocked, bool SkipSlotReset = false) {
 }
 
 void MountFATDevices(bool mountSD) {
-	if (mountSD) {
-		if (!sdMounted) {
-			// Important to set this else SD init will hang/fail!
-			fifoSetValue32Handler(FIFO_USER_04, sdStatusHandler, nullptr);
-			DoWait();
-			sdMounted = fatMountSimple("sd", __my_io_dsisd());
-			PrintProgramName();
-		}
+	if (mountSD && !sdMounted) {
+		// Important to set this else SD init will hang/fail!
+		fifoSetValue32Handler(FIFO_USER_04, sdStatusHandler, nullptr);
+		DoWait();
+		sdMounted = fatMountSimple("sd", __my_io_dsisd());
+		consoleClear();
 	}
 	if (!dsxMounted)dsxMounted = fatMountSimple("dsx", &io_dsx_);
 }
 
 bool DumpSectors(u32 sectorStart, u32 sectorCount, void* buffer, bool allowHiddenRegion) {
-	PrintProgramName();
+	consoleClear();
 	if (!dsxMounted) {
-		printf("ERROR! DS-Xtreme DLDI Init failed!\n");
+		printf("ERROR! DS-Xtreme DLDI Init\nfailed!\n");
 		while(1) {
 			swiWaitForVBlank();
 			scanKeys();
@@ -142,7 +128,7 @@ bool DumpSectors(u32 sectorStart, u32 sectorCount, void* buffer, bool allowHidde
 		if(keysDown() & KEY_A) break;
 		if(keysDown() & KEY_B) return false;
 	}
-	PrintProgramName();
+	consoleClear();
 	printf("Reading sectors to ram...\n");
 	if (allowHiddenRegion) {
 		dsx2ReadSectors(sectorStart, sectorCount, buffer);
@@ -154,11 +140,11 @@ bool DumpSectors(u32 sectorStart, u32 sectorCount, void* buffer, bool allowHidde
 }
 
 void DoFullDump(bool SCFGUnlocked) {
-	PrintProgramName();
+	consoleClear();
 	DoWait(60);	
-	iprintf("About to dump %d sectors.\n", NUM_SECTORS);
-	printf("Press A to continue.\n");
-	printf("Press B to abort.\n");
+	iprintf("About to dump %d sectors.\n\n", NUM_SECTORS);
+	printf("Press [A] to continue\n");
+	printf("Press [B] to abort\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -170,27 +156,22 @@ void DoFullDump(bool SCFGUnlocked) {
 		if (!sdMounted) { DoFATerror(true); return; }
 	} 
 	FILE *dest;
-	if (sdMounted) { dest = fopen("sd:/dsx_rom.bin", "wb"); } else { dest = fopen("dsx:/dsx_rom.bin", "wb"); }
-	int SectorsRemaining = NUM_SECTORS;
-	int RefreshTimer = 0;
-	for (int i = 0; i < NUM_SECTORS; i++){ 
-		if (RefreshTimer == 0) {
-			RefreshTimer = StatRefreshRate;
-			swiWaitForVBlank();
-			PrintProgramName();
-			printf("Dumping sectors to dsx_rom.bin.\nPlease Wait...\n\n\n");
-			iprintf("Sectors Remaining: %d \n", SectorsRemaining);
-		}
+	if (sdMounted) { dest = fopen("sd:/dsxFiles/dsx_rom.bin", "wb"); } else { dest = fopen("dsx:/dsxFiles/dsx_rom.bin", "wb"); }
+	textBuffer = "Dumping sectors to dsx_rom.bin.\nPlease Wait...\n\n\n";
+	textProgressBuffer = "Sectors Remaining: ";
+	ProgressTracker = NUM_SECTORS;
+	for (int i = 0; i < NUM_SECTORS; i++){
 		dsx2ReadSectors(i, 1, ReadBuffer);
 		fwrite(ReadBuffer, 0x200, 1, dest); // Used Region
-		SectorsRemaining--;
-		RefreshTimer--;
+		if (ProgressTracker >= 0)ProgressTracker--;
+		UpdateProgressText = true;
 	}
 	fclose(dest);
-	PrintProgramName();
-	iprintf("Sector dump finished!\n");
-	iprintf("Press A to return to main menu!\n");
-	iprintf("Press B to exit!\n");
+	while (UpdateProgressText)swiWaitForVBlank();
+	consoleClear();
+	printf("Sector dump finished!\n\n");
+	printf("Press [A] to return to main menu\n");
+	printf("Press [B] to exit\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -203,11 +184,11 @@ void DoFullDump(bool SCFGUnlocked) {
 }
 
 void DoNormalDump(bool SCFGUnlocked) {
-	PrintProgramName();
+	consoleClear();
 	DoWait(60);
-	iprintf("About to dump %d sectors.\n", USED_NUMSECTORS);
-	printf("Press A to continue.\n");
-	printf("Press B to abort.\n");
+	iprintf("About to dump %d sectors.\n\n", USED_NUMSECTORS);
+	printf("Press [A] to continue\n");
+	printf("Press [B] to abort\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -222,27 +203,22 @@ void DoNormalDump(bool SCFGUnlocked) {
 		}
 	} 
 	FILE *dest;
-	if (sdMounted) { dest = fopen("sd:/dsx_rom.bin", "wb"); } else { dest = fopen("dsx:/dsx_rom.bin", "wb"); }
-	int SectorsRemaining = USED_NUMSECTORS;
-	int RefreshTimer = 0;
+	if (sdMounted) { dest = fopen("sd:/dsxFiles/dsx_rom_used.bin", "wb"); } else { dest = fopen("dsx:/dsxFiles/dsx_rom_used.bin", "wb"); }
+	textBuffer = "Dumping sectors to\ndsx_rom_used.bin\nPlease Wait...\n\n\n";
+	textProgressBuffer = "Sectors Remaining: ";
+	ProgressTracker = USED_NUMSECTORS;
 	for (int i = 0; i < USED_NUMSECTORS; i++){ 
-		if (RefreshTimer == 0) {
-			RefreshTimer = StatRefreshRate;
-			swiWaitForVBlank();
-			PrintProgramName();
-			printf("Dumping sectors to dsx_rom.bin.\nPlease Wait...\n\n\n");
-			iprintf("Sectors Remaining: %d \n", SectorsRemaining);
-		}
 		dsx2ReadSectors(i, 1, ReadBuffer);
 		fwrite(ReadBuffer, 0x200, 1, dest); // Used Region
-		SectorsRemaining--;
-		RefreshTimer--;
+		if (ProgressTracker >= 0)ProgressTracker--;
+		UpdateProgressText = true;
 	}
 	fclose(dest);
-	PrintProgramName();
-	iprintf("Sector dump finished!\n");
-	iprintf("Press A to return to main menu!\n");
-	iprintf("Press B to exit!\n");
+	while (UpdateProgressText)swiWaitForVBlank();
+	consoleClear();
+	printf("Sector dump finished!\n\n");
+	printf("Press [A] to return to main menu\n");
+	printf("Press [B] to exit\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -255,46 +231,46 @@ void DoNormalDump(bool SCFGUnlocked) {
 }
 
 void DoCartSwap() {
-	PrintProgramName();
+	consoleClear();
 	DoWait(80);
 	if (!DumpSectors(0, USED_NUMSECTORS, CopyBuffer, true))return;
 	if (dsxMounted) {
 		fatUnmount("dsx");
 		dsxMounted = false;
 	}
-	PrintProgramName();
-	printf("\n--------[Swap carts now]--------\n\n");
-	printf("Press A once done...");
+	consoleClear();
+	printf("Swap carts now.\n\n");
+	printf("Press [A] once done");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
 		if(keysDown() & KEY_A) break;
 	}
-	PrintProgramName();
-	printf("Please wait...");
+	consoleClear();
+	printf("Please wait...\n\n");
 	DoWait(60);
 	CardInit(false, false, true);
-	printf("Press A to continue...");
+	printf("Press [A] to continue\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
 		if(keysDown() & KEY_A) break;
 	}
-	PrintProgramName();
+	consoleClear();
 	DoWait(30);
 	if (!fatInitDefault()) {
 		DoFATerror(true);
 		return;
 	}
 	FILE* dest = fopen("/dsx_rom.bin", "wb");
-	PrintProgramName();
-	iprintf("Writing to dsx_rom.bin.\n\nPlease wait...\n");
+	consoleClear();
+	iprintf("Writing to dsx_rom.bin...\n\nPlease wait...\n");
 	fwrite(CopyBuffer, 0x292000, 1, dest); // Used Region
 	fclose(dest);
 	fflush(dest);
-	PrintProgramName();
-	iprintf("Sector dump finished!\n");
-	iprintf("Press A to exit!\n");
+	consoleClear();
+	iprintf("Sector dump finished!\n\n");
+	iprintf("Press [A] to exit\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -306,10 +282,10 @@ void DoCartSwap() {
 }
 
 void DoBannerWrite(bool SCFGUnlocked) {
-	PrintProgramName();
-	printf("About to write custom banner.\n");
+	consoleClear();
+	printf("About to write custom banner!\n\n");
 	DoWait(60);
-	printf("Press A to begin!\nPress B to abort!\n");
+	printf("Press [A] to begin\nPress [B] to abort\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -324,24 +300,27 @@ void DoBannerWrite(bool SCFGUnlocked) {
 			return;
 		}
 	}
-	PrintProgramName();
+	consoleClear();
 	printf("Reading dsx_banner.bin...\n");
 	FILE *bannerFile;
-	if (sdMounted) { bannerFile = fopen("sd:/dsx_banner.bin", "rb"); } else { bannerFile = fopen("dsx:/dsx_banner.bin", "rb"); }
+	if (sdMounted) { bannerFile = fopen("sd:/dsxFiles/dsx_banner.bin", "rb"); } else { bannerFile = fopen("dsx:/dsxFiles/dsx_banner.bin", "rb"); }
 	if (bannerFile) {
 		fread(BannerBuffer, 1, BANNERBUFFERSIZE, bannerFile);
-		PrintProgramName();
+		consoleClear();
+		ProgressTracker = BANNERSECTORCOUNT;
+		textBuffer = "Do not power off!\nWriting new banner to cart...\n";
+		textProgressBuffer = "Sectors Remaining: ";
 		printf("Do not power off!\n");
 		printf("Writing new banner to cart...\n");
 		DoWait(60);
 		fclose(bannerFile);
-		tempSectorTracker = BANNERSECTORCOUNT;
 		dsx2WriteSectors(BANNERSECTORSTART, BANNERSECTORCOUNT, BannerBuffer);
-		PrintProgramName();
-		printf("Finished!\n\nPress A to return to main menu!\n");
+		while(UpdateProgressText)swiWaitForVBlank();
+		consoleClear();
+		printf("Finished!\n\nPress [A] to return to main menu\n");
 	} else {
-		PrintProgramName();
-		printf("Banner file not found!\n\nPress A to return to main menu!\n");
+		consoleClear();
+		printf("Banner file not found!\n\nPress [A] to return to main menu\n");
 	}
 	while(1) {
 		swiWaitForVBlank();
@@ -351,7 +330,7 @@ void DoBannerWrite(bool SCFGUnlocked) {
 }
 
 /*void DoHeaderWrite(bool SCFGUnlocked) {
-	PrintProgramName();
+	consoleClear();
 	printf("About to write custom header.\n");
 	DoWait(60);
 	printf("Press A to begin!\nPress B to abort!\n");
@@ -369,23 +348,23 @@ void DoBannerWrite(bool SCFGUnlocked) {
 			return;
 		}
 	}
-	PrintProgramName();
+	consoleClear();
 	printf("Reading dsx_header.bin...\n");
 	FILE *headerFile;
-	if (sdMounted) { headerFile = fopen("sd:/dsx_header.bin", "rb"); } else { headerFile = fopen("dsx:/dsx_header.bin", "rb"); }
+	if (sdMounted) { headerFile = fopen("sd:/dsxFiles/dsx_header.bin", "rb"); } else { headerFile = fopen("dsx:/dsxFiles/dsx_header.bin", "rb"); }
 	if (headerFile) {
 		fread(ReadBuffer, 1, 0x200, headerFile);
-		PrintProgramName();
+		consoleClear();
 		printf("Do not power off!\n");
 		printf("Writing new header to cart...\n");
 		DoWait(60);
 		fclose(headerFile);
 		tempSectorTracker = HEADERSECTORCOUNT;
 		dsx2WriteSectors(HEADERSECTORSTART, HEADERSECTORCOUNT, ReadBuffer);
-		PrintProgramName();
+		consoleClear();
 		printf("Finished!\n\nPress A to return to main menu!\n");
 	} else {
-		PrintProgramName();
+		consoleClear();
 		printf("Header file not found!\n\nPress A to return to main menu!\n");
 	}
 	while(1) {
@@ -395,8 +374,9 @@ void DoBannerWrite(bool SCFGUnlocked) {
 	}
 }*/
 
+// This function courtasy of lifehackerhansol
 void DoArmBinaryWrites(bool SCFGUnlocked) {
-	PrintProgramName();
+	consoleClear();
 	printf("About to write custom arm\nbinaries!\n\n");
 	DoWait(60);
 	printf("Press A to begin!\nPress B to abort!\n");
@@ -414,43 +394,44 @@ void DoArmBinaryWrites(bool SCFGUnlocked) {
 			return;
 		}
 	}
-	PrintProgramName();
+	consoleClear();
 	printf("Reading dsx_firmware.nds...\n");
 	FILE *ndsFile;
 	if (sdMounted) {
-		ndsFile = fopen("sd:/dsx_firmware.nds", "rb");
+		ndsFile = fopen("sd:/dsxFiles/dsx_firmware.nds", "rb");
 	} else { 
-		ndsFile = fopen("dsx:/dsx_firmware.nds", "rb"); 
+		ndsFile = fopen("dsx:/dsxFiles/dsx_firmware.nds", "rb"); 
 	}
 	if (!ndsFile) {
-		PrintProgramName();
-		printf("Error! dsx_firmware.nds\nis missing!\n");
-		printf("Press A to return to Main Menu!\n");
+		consoleClear();
+		printf("Error: dsx_firmware.nds is\nmissing!\n\n");
+		printf("Press [A] to return to Main Menu\n");
 		while(1) {
 			swiWaitForVBlank();
 			scanKeys();
 			if(keysDown() & KEY_A)return;			
 		}
 	}
+	consoleClear();
 	printf("Reading dsx_firmware.nds header...\n");
 	ALIGN(4) tNDSHeader* srcNdsHeader = (tNDSHeader*)malloc(sizeof(tNDSHeader));
 	fread(srcNdsHeader, sizeof(tNDSHeader), 1, ndsFile);
 	// sanity check the binary sizes. We do have limits, after all
 	if(srcNdsHeader->arm9binarySize > ARM9BUFFERSIZE || srcNdsHeader->arm7binarySize > ARM7BUFFERSIZE)
 	{
-		PrintProgramName();
+		consoleClear();
 		printf("Error! The ARM9 or ARM7 binary is\ntoo large!\n");
 		if(srcNdsHeader->arm9binarySize > ARM9BUFFERSIZE)
-			printf("ARM9 size must be under\n%d bytes!", ARM9BUFFERSIZE);
+			printf("ARM9 size must be under\n%d bytes!\n", ARM9BUFFERSIZE);
 		if(srcNdsHeader->arm7binarySize > ARM7BUFFERSIZE)
-			printf("ARM7 size must be under\n%d bytes!", ARM7BUFFERSIZE);
-		printf("Press A to return to Main Menu!\n");
+			printf("ARM7 size must be under\n%d bytes!\n", ARM7BUFFERSIZE);
+		printf("\nPress [A] to return to Main Menu\n");
 		fclose(ndsFile);
 		free(srcNdsHeader);
 		while(1) {
 			swiWaitForVBlank();
 			scanKeys();
-			if(keysDown() & KEY_A)return;			
+			if(keysDown() & KEY_A)return;
 		}
 	}
 	/*
@@ -458,20 +439,20 @@ void DoArmBinaryWrites(bool SCFGUnlocked) {
 		These must match the original DS-Xtreme header, which, as of 1.1.3, are the following:
 		ARM9 = 0x02000000, ARM7 = 0x03800000
 	*/
-	if(
+	if (
 		(u32)srcNdsHeader->arm9executeAddress != 0x02000000 ||
 		(u32)srcNdsHeader->arm9destination != 0x02000000 ||
 		(u32)srcNdsHeader->arm7executeAddress != 0x03800000 ||
 		(u32)srcNdsHeader->arm7destination != 0x03800000
 	)
 	{
-		PrintProgramName();
-		printf("Error! The ARM9 or ARM7 binary cannot\nboot on this flashcart!\n");
+		consoleClear();
+		printf("Error: The ARM9 or ARM7 binary\ncannot boot on this flashcart!\n");
 		if((u32)srcNdsHeader->arm9executeAddress != 0x02000000 || (u32)srcNdsHeader->arm9destination != 0x02000000)
-			printf("ARM9 must be located at\naddress 0x02000000!");
+			printf("ARM9 must be located at\naddress 0x02000000!\n");
 		if((u32)srcNdsHeader->arm7executeAddress != 0x03800000 || (u32)srcNdsHeader->arm7destination != 0x03800000)
-			printf("ARM7 must be located at\naddress 0x03800000!");
-		printf("Press A to return to Main Menu!\n");
+			printf("ARM7 must be located at\naddress 0x03800000!\n");
+		printf("\nPress [A] to return to Main Menu\n");
 		fclose(ndsFile);
 		free(srcNdsHeader);
 		while(1) {
@@ -480,32 +461,34 @@ void DoArmBinaryWrites(bool SCFGUnlocked) {
 			if(keysDown() & KEY_A)return;			
 		}
 	}
-	
 	printf("Reading ARM9...\n");
 	fseek(ndsFile, srcNdsHeader->arm9romOffset, SEEK_SET);
 	fread(CopyBuffer, 1, srcNdsHeader->arm9binarySize, ndsFile);
-	PrintProgramName();
-	printf("Writing new arm9 binary to cart...\n");
-	printf("Do not power off!\n");
+	consoleClear();
+	printf("Writing new arm9 binary to cart.\nDo not power off!\n");
+	textBuffer = "Writing new arm9 binary to cart.\nDo not power off...\n";
+	textProgressBuffer = "Sectors Remaining: ";
+	ProgressTracker = ARM9SECTORCOUNT;
 	DoWait(60);
-	tempSectorTracker = ARM9SECTORCOUNT;
 	dsx2WriteSectors(ARM9SECTORSTART, ARM9SECTORCOUNT, CopyBuffer);
 	DoWait(60);
-	PrintProgramName();
+	consoleClear();
 	printf("Reading ARM7...\n");
 	fseek(ndsFile, srcNdsHeader->arm7romOffset, SEEK_SET);
 	fread(CopyBuffer, 1, srcNdsHeader->arm7binarySize, ndsFile);
-	PrintProgramName();
-	printf("Writing new arm7 binary to cart...\n");
-	printf("Do not power off!\n");
+	consoleClear();
+	printf("Writing new arm7 binary to cart.\nDo not power off...\n");
+	textBuffer = "Writing new arm7 binary to cart.\nDo not power off...\n";
+	textProgressBuffer = "Sectors Remaining: ";
+	ProgressTracker = ARM7SECTORCOUNT;
 	fclose(ndsFile);
 	free(srcNdsHeader);
 	DoWait(60);
-	PrintProgramName();
-	tempSectorTracker = ARM7SECTORCOUNT;
+	consoleClear();
 	dsx2WriteSectors(ARM7SECTORSTART, ARM7SECTORCOUNT, CopyBuffer);
-	PrintProgramName();
-	printf("Finished!\n\nPress A to return to main menu!\n");
+	while(UpdateProgressText)swiWaitForVBlank();
+	consoleClear();
+	printf("Finished!\n\nPress [A] to return to main menu\n");
 	while(1) {
 		swiWaitForVBlank();
 		scanKeys();
@@ -515,29 +498,39 @@ void DoArmBinaryWrites(bool SCFGUnlocked) {
 
 
 int MainMenu(bool SCFGUnlocked) {
-	int Value = 0;
-	PrintProgramName();
-	printf("A to dump used hidden region\n");
-	if (!SCFGUnlocked)printf("(X to switch Slot1 DLDI target)\n\n");
+	int Value = -1;
+	consoleClear();
+	printf("Press [A] to dump used hidden\nregion\n\n");
+	printf("Press [Y] to dump full hidden\nregion\n\n");
+	printf("Press [X] to write new banner\n\n");
+	printf("Press [START] to write new Arm\nbinaries\n\n");
+	if (!SCFGUnlocked) { printf("Press [SELECT] to switch DLDI\ntarget\n\n\n"); } else { printf("\n\n\n\n\n"); }
+	printf("\nPress [B] to abort and exit\n");
 	// printf("DPAD DOWN to write custom header\n");
-	printf("DPAD UP to dump full hidden\nregion\n\n");
-	printf("START to write new banner\n");
-	printf("SELECT to write new Arm binaries\n\n\n");
-	printf("B to abort and exit\n");
-	while(1) {
+	while(Value == -1) {
 		swiWaitForVBlank();
 		scanKeys();
 		switch (keysDown()){
-			case KEY_A: 	{ return Value;} break;
-			case KEY_X: 	{ if (!SCFGUnlocked)return 1; } break;
-			case KEY_START: { return 2;} break;
-			case KEY_SELECT:{ return 3;} break;
-			case KEY_B: 	{ return 4;} break;
-			case KEY_UP: 	{ return 5;} break;
-			// case KEY_DOWN:	{ return 6;} break;
+			case KEY_A: 	{ Value = 0; } break;
+			case KEY_Y: 	{ Value = 1; } break;
+			case KEY_X:		{ Value = 2; } break;
+			case KEY_START:	{ Value = 3; } break;
+			case KEY_SELECT:{ if (!SCFGUnlocked)Value = 4; } break;
+			case KEY_B: 	{ Value = 5; } break;
+			// case KEY_DOWN:	{ Value = 6;} break;
 		}
 	}
 	return Value;
+}
+
+void vblankHandler (void) {
+	if (UpdateProgressText) {
+		consoleClear();
+		printf(textBuffer);
+		printf(textProgressBuffer);
+		iprintf("%d \n", ProgressTracker);
+		UpdateProgressText = false;
+	}
 }
 
 int main() {
@@ -546,15 +539,15 @@ int main() {
 	bool SCFGUnlocked = false;
 	if ((REG_SCFG_EXT & BIT(31))) { 
 		// Set NTR clocks. (DSx Does not play nice at the higher clock speeds. You've been warned!
-		REG_SCFG_CLK = 0x00;
+		REG_SCFG_CLK = 0x80;
 		REG_SCFG_EXT &= ~(1UL << 13); // Disable VRAM boost. Another thing that might throw off DSX write wait timers.
 		SCFGUnlocked = true;
 		DoWait(10);
 	}
 	defaultExceptionHandler();
 	BootSplashInit();
-	sysSetCardOwner (BUS_OWNER_ARM9);
 	sysSetCartOwner (BUS_OWNER_ARM9);
+	sysSetCardOwner (BUS_OWNER_ARM9);
 	MountFATDevices(SCFGUnlocked);
 	if (!dsxMounted) {
 		DoFATerror(true);
@@ -562,14 +555,23 @@ int main() {
 		fifoSendValue32(FIFO_USER_03, 1);
 		return 0;
 	}
+	
+	if (sdMounted) { 
+		if(access("sd:/dsxFiles", F_OK) != 0)mkdir("sd:/dsxFiles", 0777); 
+	} else if (dsxMounted) { 
+		if(access("dsx:/dsxFiles", F_OK) != 0)mkdir("dsx:/dsxFiles", 0777); 
+	}
+	
+	// Enable vblank handler
+	irqSet(IRQ_VBLANK, vblankHandler);
 	while(1) {
 		switch (MainMenu(SCFGUnlocked)) {
 			case 0: { DoNormalDump(SCFGUnlocked); } break;
-			case 1: { if (!SCFGUnlocked)DoCartSwap(); } break;
+			case 1: { DoFullDump(SCFGUnlocked); } break;
 			case 2: { DoBannerWrite(SCFGUnlocked); } break;
 			case 3: { DoArmBinaryWrites(SCFGUnlocked); } break;
-			case 4: { ErrorState = true; } break;
-			case 5: { DoFullDump(SCFGUnlocked); } break;
+			case 4: { if (!SCFGUnlocked)DoCartSwap(); } break;
+			case 5: { ErrorState = true; } break;
 			// case 6: { DoHeaderWrite(SCFGUnlocked); } break;
 		}
 		if (ErrorState) {

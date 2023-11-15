@@ -46,12 +46,10 @@
 // the following defines are from libnds
 // Card bus
 #define	REG_CARD_DATA_RD	(*(vu32*)0x04100010)
-
 #define REG_AUXSPICNT	(*(vu16*)0x040001A0)
 #define REG_AUXSPICNTH	(*(vu8*)0x040001A1)
 #define REG_AUXSPIDATA	(*(vu8*)0x040001A2)
 #define REG_ROMCTRL		(*(vu32*)0x040001A4)
-
 #define REG_CARD_COMMAND	((vu8*)0x040001A8)
 
 #define CARD_ACTIVATE     (1<<31)           // when writing, get the ball rolling
@@ -64,16 +62,14 @@
 
 #define CARD_ENABLE			(1<<15)
 
-#define StatRefreshRate 41
-
 // Define last zone that was read or written
 static int dsxLastZone = -1;
 
 static unsigned char dsxBuffer[BYTES_PER_READ];
 
-volatile int tempSectorTracker = 0;
-volatile int tempSectorTimer = 0;
-extern void PrintProgramName(void);
+extern int ProgressTracker;
+extern bool UpdateProgressText;
+
 /*-----------------------------------------------------------------
 wait_msecs
 Wait for a certain amount of milliseconds, uses vertical scanlines to synchronize.
@@ -186,30 +182,21 @@ startUp
 Initialize the interface, geting it into an idle, ready state
 returns true if successful, otherwise returns false
 -----------------------------------------------------------------*/
-bool dsxStartup(void) {
-	return true;
-}
+bool dsxStartup(void) { return true; }
 
 /*-----------------------------------------------------------------
 isInserted
 Is a card inserted?
 return true if a card is inserted and usable
 -----------------------------------------------------------------*/
-bool dsxIsInserted (void) {
-	//we should probably be doing a check here!
-	return true;
-}
-
+bool dsxIsInserted(void) { return true; } //we should probably be doing a check here!
 
 /*-----------------------------------------------------------------
 clearStatus
 Reset the card, clearing any status errors
 return  true if the card is idle and ready
 -----------------------------------------------------------------*/
-bool dsxClearStatus (void) {
-	return true;
-}
-
+bool dsxClearStatus(void) { return true; }
 
 /*-----------------------------------------------------------------
 readSectors
@@ -319,6 +306,7 @@ void dsx2ReadSectors (u32 sector, u32 numSectors, void* buffer) {
 		buf8 += BYTES_PER_READ;
 	}
 }
+
 void dsx2WriteSectors (u32 sector, u32 numSectors, void* buffer) {
 	unsigned char *buf = (unsigned char*)buffer;
 	unsigned int i, j;
@@ -330,21 +318,14 @@ void dsx2WriteSectors (u32 sector, u32 numSectors, void* buffer) {
 	//Don't interrupt the card if he's busy.. he gets grumpy.
 	dsxPoll();
 	for(j=0; j<numSectors; j++) {
-		if (tempSectorTracker>0){
-			if (tempSectorTimer == 0) {
-				swiWaitForVBlank();
-				PrintProgramName();		
-				iprintf("Sectors remaining: %d ...\n", tempSectorTracker);
-				printf("Do not power off!\n");
-				tempSectorTimer = StatRefreshRate;
-			}
-			tempSectorTimer--;
-			tempSectorTracker--;
+		if (ProgressTracker > 0){
+			ProgressTracker--;
+			UpdateProgressText = true;
 		}
 		// Check if we are switching zones
-		//Don't issue a write across a zone.
-		//it's not possible to begin with
-		//But... if you do find a way to do it... don't.
+		// Don't issue a write across a zone.
+		// it's not possible to begin with
+		// But... if you do find a way to do it... don't.
 		dsxZoneSwitch(lba);
 		//Reset fpga ram address
 		command[0] = 0x03000000;
@@ -379,8 +360,5 @@ void dsx2WriteSectors (u32 sector, u32 numSectors, void* buffer) {
 shutdown
 shutdown the card, performing any needed cleanup operations
 -----------------------------------------------------------------*/
-bool dsxShutdown(void) {
-	//bye bye.
-	return true;
-}
+bool dsxShutdown(void) { return true; } //bye bye.
 
